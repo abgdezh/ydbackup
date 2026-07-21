@@ -1,0 +1,57 @@
+# macOS / Windows metadata
+.DS_Store
+.AppleDouble
+Thumbs.db
+Desktop.ini
+
+# Editors and local IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python environments and generated files
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+
+# Environment files and credentials
+.env
+.env.*
+!.env.example
+client_secret.json
+client_secret*.json
+credentials.json
+credentials*.json
+google-token.json
+google-token*.json
+yandex-token.txt
+yandex-token*.txt
+service-account*.json
+*-service-account.json
+*service-account*.json
+application_default_credentials.json
+*.pem
+*.p12
+*.key
+.secrets/
+
+# Local backup state, incomplete transfers, and logs
+.state/
+downloads/
+*.part
+*.log
