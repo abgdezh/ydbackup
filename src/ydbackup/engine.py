@@ -41,6 +41,7 @@ def run_backup(
     on_event: EventHandler = print,
 ) -> BackupSummary:
     summary = BackupSummary()
+    drive.load_inventory()
     root_id = drive.ensure_folder("root", destination_name, create=not dry_run)
 
     for source in yandex.iter_files():

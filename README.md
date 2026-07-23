@@ -3,6 +3,7 @@
 `ydbackup` copies files from Yandex Disk into a `Yandex Disk/` folder in Google Drive.
 
 - Incremental: completed files are skipped on later runs.
+- Efficient: Google Drive metadata and checksums are loaded in bulk.
 - Restartable: partial Yandex downloads resume automatically.
 - Verified: checksums are compared when available.
 - Non-deleting: removing a file from Yandex does not remove its Google Drive backup.

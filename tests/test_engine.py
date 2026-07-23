@@ -31,6 +31,10 @@ class FakeYandex:
 class FakeDrive:
     def __init__(self) -> None:
         self.uploads = []
+        self.inventory_loads = 0
+
+    def load_inventory(self):
+        self.inventory_loads += 1
 
     def ensure_folder(self, parent_id, name, *, create=True):
         return f"{parent_id}/{name}" if create else None
@@ -51,6 +55,7 @@ def test_run_backup_downloads_uploads_and_cleans_temp_file(tmp_path) -> None:
 
     assert summary.uploaded == 1
     assert summary.failed == 0
+    assert drive.inventory_loads == 1
     assert drive.uploads == [
         (b"abc", "disk:/Photos/a.jpg", "root/Yandex Disk/Photos", "a.jpg")
     ]

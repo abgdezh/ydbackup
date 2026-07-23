@@ -17,6 +17,13 @@ from .models import YandexFile
 
 DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+ALL_FILES_QUERY = "trashed = false"
+ROOT_CHILDREN_QUERY = "'root' in parents and trashed = false"
+INVENTORY_FIELDS = (
+    "nextPageToken,incompleteSearch,"
+    "files(id,name,parents,mimeType,size,sha256Checksum,md5Checksum,"
+    "appProperties,modifiedTime)"
+)
 
 
 class DuplicateDestinationError(RuntimeError):
@@ -53,49 +60,105 @@ def build_drive(credentials: Credentials) -> Resource:
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
-def escape_query_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("'", "\\'")
-
-
 class GoogleDriveClient:
     def __init__(self, service: Resource) -> None:
         self.service = service
-        self._folder_cache: dict[tuple[str, str], str] = {}
+        self._inventory_loaded = False
+        self._folder_index: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._file_index: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
-    def _find_children(self, parent_id: str, name: str, mime_type: str | None = None) -> list[dict[str, Any]]:
-        clauses = [
-            f"'{escape_query_value(parent_id)}' in parents",
-            f"name = '{escape_query_value(name)}'",
-            "trashed = false",
-        ]
-        if mime_type:
-            clauses.append(f"mimeType = '{escape_query_value(mime_type)}'")
-        result = (
-            self.service.files()
-            .list(
-                q=" and ".join(clauses),
-                spaces="drive",
-                pageSize=10,
-                fields="files(id,name,mimeType,size,sha256Checksum,md5Checksum,appProperties,modifiedTime)",
-            )
-            .execute(num_retries=5)
+    @staticmethod
+    def _add_index_item(
+        index: dict[tuple[str, str], list[dict[str, Any]]],
+        key: tuple[str, str],
+        item: dict[str, Any],
+    ) -> None:
+        matches = index.setdefault(key, [])
+        if not any(existing.get("id") == item.get("id") for existing in matches):
+            matches.append(item)
+
+    def _index_item(self, item: dict[str, Any]) -> None:
+        name = item.get("name")
+        if not name:
+            return
+        index = (
+            self._folder_index
+            if item.get("mimeType") == FOLDER_MIME_TYPE
+            else self._file_index
         )
-        return list(result.get("files", []))
+        for parent_id in item.get("parents") or []:
+            self._add_index_item(index, (parent_id, name), item)
+
+    def _index_root_item(self, item: dict[str, Any]) -> None:
+        name = item.get("name")
+        if not name:
+            return
+        index = (
+            self._folder_index
+            if item.get("mimeType") == FOLDER_MIME_TYPE
+            else self._file_index
+        )
+        self._add_index_item(index, ("root", name), item)
+
+    def _load_inventory_pages(self, query: str, *, root_children: bool = False) -> None:
+        page_token: str | None = None
+        while True:
+            arguments: dict[str, Any] = {
+                "q": query,
+                "spaces": "drive",
+                "pageSize": 1000,
+                "fields": INVENTORY_FIELDS,
+            }
+            if page_token:
+                arguments["pageToken"] = page_token
+            result = (
+                self.service.files()
+                .list(**arguments)
+                .execute(num_retries=5)
+            )
+            if result.get("incompleteSearch"):
+                raise RuntimeError(
+                    "Google Drive returned an incomplete bulk file listing"
+                )
+            for item in result.get("files", []):
+                if root_children:
+                    self._index_root_item(item)
+                else:
+                    self._index_item(item)
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+    def load_inventory(self) -> None:
+        """Load all app-visible Drive metadata in pages of up to 1,000 items."""
+        if self._inventory_loaded:
+            return
+        self._folder_index.clear()
+        self._file_index.clear()
+        try:
+            # With drive.file scope, files.get("root") can return 404. Listing
+            # app-visible root children resolves the "root" alias safely.
+            self._load_inventory_pages(
+                ROOT_CHILDREN_QUERY,
+                root_children=True,
+            )
+            self._load_inventory_pages(ALL_FILES_QUERY)
+        except Exception:
+            self._folder_index.clear()
+            self._file_index.clear()
+            raise
+        self._inventory_loaded = True
 
     def find_folder(self, parent_id: str, name: str) -> str | None:
-        cache_key = (parent_id, name)
-        if cache_key in self._folder_cache:
-            return self._folder_cache[cache_key]
-        matches = self._find_children(parent_id, name, FOLDER_MIME_TYPE)
+        self.load_inventory()
+        matches = self._folder_index.get((parent_id, name), [])
         if len(matches) > 1:
             raise DuplicateDestinationError(
                 f"Multiple Google Drive folders named {name!r} exist under the same parent"
             )
         if not matches:
             return None
-        folder_id = matches[0]["id"]
-        self._folder_cache[cache_key] = folder_id
-        return folder_id
+        return matches[0]["id"]
 
     def ensure_folder(self, parent_id: str, name: str, *, create: bool = True) -> str | None:
         existing = self.find_folder(parent_id, name)
@@ -105,20 +168,21 @@ class GoogleDriveClient:
             self.service.files()
             .create(
                 body={"name": name, "mimeType": FOLDER_MIME_TYPE, "parents": [parent_id]},
-                fields="id",
+                fields="id,name,parents,mimeType",
             )
             .execute(num_retries=5)
         )
-        folder_id = folder["id"]
-        self._folder_cache[(parent_id, name)] = folder_id
-        return folder_id
+        folder.setdefault("name", name)
+        folder.setdefault("parents", [parent_id])
+        folder.setdefault("mimeType", FOLDER_MIME_TYPE)
+        self._index_item(folder)
+        if parent_id == "root":
+            self._index_root_item(folder)
+        return folder["id"]
 
     def find_file(self, parent_id: str, name: str) -> dict[str, Any] | None:
-        matches = [
-            item
-            for item in self._find_children(parent_id, name)
-            if item.get("mimeType") != FOLDER_MIME_TYPE
-        ]
+        self.load_inventory()
+        matches = self._file_index.get((parent_id, name), [])
         if len(matches) > 1:
             raise DuplicateDestinationError(
                 f"Multiple Google Drive files named {name!r} exist under the same parent"
@@ -176,13 +240,19 @@ class GoogleDriveClient:
                 fileId=existing_file_id,
                 body=body,
                 media_body=media,
-                fields="id,name,size,sha256Checksum,md5Checksum,appProperties",
+                fields=(
+                    "id,name,parents,mimeType,size,sha256Checksum,"
+                    "md5Checksum,appProperties"
+                ),
             )
         else:
             request = self.service.files().create(
                 body=body,
                 media_body=media,
-                fields="id,name,size,sha256Checksum,md5Checksum,appProperties",
+                fields=(
+                    "id,name,parents,mimeType,size,sha256Checksum,"
+                    "md5Checksum,appProperties"
+                ),
             )
         response = None
         while response is None:
@@ -195,4 +265,20 @@ class GoogleDriveClient:
         remote_sha256 = response.get("sha256Checksum")
         if source.sha256 and remote_sha256 and remote_sha256.lower() != source.sha256.lower():
             raise RuntimeError(f"Google Drive SHA-256 mismatch for {source.path}")
+        response.setdefault("name", name)
+        response.setdefault("parents", [parent_id])
+        response.setdefault("mimeType", source.mime_type or "application/octet-stream")
+        key = (parent_id, name)
+        current = self._file_index.setdefault(key, [])
+        if existing_file_id:
+            replaced = False
+            for index, item in enumerate(current):
+                if item.get("id") == existing_file_id:
+                    current[index] = response
+                    replaced = True
+                    break
+            if not replaced:
+                current.append(response)
+        else:
+            current.append(response)
         return response
