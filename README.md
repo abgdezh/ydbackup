@@ -103,6 +103,66 @@ Limit a test run:
 ydbackup backup --max-files 10
 ```
 
+## Parallel folder CLI
+
+The separate `ydbackup-parallel` command uses the same authorization and backup
+metadata as `ydbackup`. Reinstall with `python -m pip install -e .` after updating
+the repository to register the new command.
+
+List Yandex files as a tree without accessing Google Drive:
+
+```bash
+ydbackup-parallel tree
+```
+
+Enumerate the entire source first, then upload with four folder workers:
+
+```bash
+ydbackup-parallel backup --workers 4
+```
+
+Each worker processes one folder's files sequentially. Leaf folders are scheduled
+first, reversing the order returned by the Yandex listing used by the original
+CLI. Siblings are prioritized by their last occurrence in that listing, and files
+within a folder are reversed too. Files directly in parent folders are processed
+after their child folders finish, so they are not left out. Parallel jobs can
+finish in a different order than they start.
+
+The source tree is reconstructed from the complete file listing; empty source
+folders are omitted. Repeated paths across listing pages become one upload job,
+retaining their first position and the latest listed metadata.
+No Google folders are created during enumeration, inventory
+loading, dry runs, or skipped files. When a downloaded file is ready to upload,
+its destination folder and required ancestors are created immediately before the
+upload. If that upload fails, the created folder may remain empty until a retry.
+
+The live terminal view shows completed folder batches out of the total, file
+totals, and each worker's current folder, file, and download/upload stage.
+Folders containing direct files count as batches; ancestor folders with no
+direct files do not count as transfer work. Detailed timestamped events are
+appended to `~/.local/state/ydbackup/parallel-backup.log` with owner-only permissions.
+
+```bash
+ydbackup-parallel backup --workers 6 --log-file ~/ydbackup.log
+ydbackup-parallel backup --no-tui --quiet-tree
+ydbackup-parallel backup --workers 3 --dry-run --max-files 10
+```
+
+`--max-files` limits the reverse upload plan **after** complete enumeration.
+`--source`, `--destination`, and `--exclude` work as in the original CLI.
+Redirected output automatically uses plain output instead of the TUI.
+
+Folder creation is synchronized among workers, and each worker has its own API
+connections. Run only one uploading CLI against a destination at a time: separate
+processes keep separate Drive inventories and can otherwise create duplicate
+folders. Stop the original run with Ctrl+C before switching to the new command,
+or use a different `--destination` when running both.
+
+Rerun the same command after an interruption to skip completed uploads and resume
+partial downloads from `~/.local/state/ydbackup/parallel-downloads/`. Ctrl+C stops
+scheduling new work and waits for active transfer requests to return before
+exiting. Uploads already in progress may finish during shutdown.
+
 ## Restarting a backup
 
 Run the same command again after an interruption. Successfully uploaded files are detected through private Google Drive metadata and checksums, so they are skipped.
